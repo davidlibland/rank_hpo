@@ -4,7 +4,7 @@
 
 import pytest
 
-from rank_hpo import rank_hpo
+from rank_hpo import core
 
 
 @pytest.fixture
