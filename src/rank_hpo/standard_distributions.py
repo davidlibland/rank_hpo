@@ -33,16 +33,17 @@ def gaussian(std: Union[float, LEARN] = 1):
 
 def two_layer_mlp(visible_dim):
     def log_rho(x, theta):
-        # Theta is a 2-visible_dim-dimensional vector, the first visible_dim dimensions
-        # are the mean of the distribution, the second visible_dim-dimensions are the
-        # diagonal standard deviations of the distribution.
-        mean, log_std = theta[:visible_dim].reshape(1, -1), theta[visible_dim:].reshape(
-            1, -1
-        )
-        var = torch.sigmoid(2 * log_std)
-        return -torch.sum(0.5 * (x - mean) ** 2 / var, dim=1) - torch.sum(
-            log_std, dim=1
-        )
+        """This is a simple 2-layer mlp units and gelu activation"""
+        layer_1_weights = theta[:visible_dim]
+        layer_1_bias = theta[visible_dim:visible_dim+1]
+        layer_2_weights = theta[visible_dim+1:visible_dim+2]
+
+        # layer_1 = torch.nn.functional.gelu(x@layer_1_weights+layer_1_bias)
+        linear_1 = x @ layer_1_weights + layer_1_bias
+        linear_1 = torch.nn.functional.layer_norm(linear_1, normalized_shape=layer_1_weights.shape[1:])
+        layer_1 = torch.nn.functional.gelu(linear_1)
+        layer_2 = layer_1 @ layer_2_weights.T
+        return layer_2 - (1e-4 * x ** 2).sum(dim=1, keepdim=True)
 
     return log_rho
 
@@ -55,8 +56,6 @@ def gaussian_mixture(grid: np.ndarray, std=1):
     Args:
         grid: The grid of points to center the gaussians at, of shape (n, d)
     """
-    grid = torch.tensor(grid, dtype=torch.double, requires_grad=False)
-
     def log_rho(x, theta):
         """Theta is of shape (n, d), and represents the weight of each gaussian"""
         gaussians = (

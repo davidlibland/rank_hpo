@@ -7,7 +7,8 @@ import torch
 from matplotlib import pyplot as plt
 from scipy.stats import rankdata
 
-from rank_hpo.sampling import sorted_exp_sample, langevin_step
+from rank_hpo.logging import TimeSeriesLogger
+from rank_hpo.sampling import sorted_exp_sample, langevin_step, sorted_exp_sample_torch
 
 
 def infer_rates(samples: List[np.ndarray], n_iter=1000):
@@ -37,9 +38,15 @@ def infer_rates(samples: List[np.ndarray], n_iter=1000):
     return rate / rate.max()
 
 
+def _rank_data(data: torch.Tensor) -> torch.Tensor:
+    """Returns the (zero-based) rank of elements in the data."""
+    temp = torch.argsort(data.flatten())
+    return torch.argsort(temp).reshape(data.shape)
+
+
 def optimize_function_langevin(
-    function: Callable[[np.ndarray], float],
-    x0s: List[np.ndarray],
+    function: Callable[[torch.Tensor], torch.Tensor],
+    x0s: List[torch.Tensor],
     log_rho,
     theta: torch.Tensor,
     n_evals=1000,
@@ -48,17 +55,17 @@ def optimize_function_langevin(
     param_step_size=1e-3,
     sample_step_size=1e-3,
     n_langevin_steps=10,
-    batch_size=100,
     param_temperature_range=(1, 0.1),
     sample_temperature_range=(1, 0.1),
+    n_log_samples=100,
 ):
-    x0s = [torch.tensor(x0, requires_grad=False) for x0 in x0s]
+    x0s = [x0.clone().requires_grad_(False) for x0 in x0s]
     xs = torch.stack(x0s, dim=0)
-    ys = np.array([function(x.detach().numpy()).flatten() for x in x0s])
-    rates = np.ones(len(xs))
-    theta_grads = []
-    x_grads = []
-    latent_samples_log = []
+    ys = torch.concat([function(x.detach()).flatten() for x in x0s])
+    rates = torch.ones(len(xs), device=theta.device)
+    theta_grad_logger = TimeSeriesLogger(n_log_samples)
+    x_grad_logger = TimeSeriesLogger(n_log_samples)
+    latent_samples_logger = TimeSeriesLogger(n_log_samples, dim=n_log_samples//10)
     for i in range(n_evals):
         temperature = (n_evals - i) / n_evals
         param_temperature = (
@@ -68,27 +75,15 @@ def optimize_function_langevin(
             sample_temperature_range[0] - sample_temperature_range[1]
         ) * temperature + sample_temperature_range[1]
         for _ in range(n_iter):
-            order = (
-                rankdata(
-                    np.nan_to_num(np.array(ys), nan=float("inf")), method="ordinal"
-                )
-                - 1
-            )
-            latent_samples = torch.tensor(
-                sorted_exp_sample(rates, order, n_samples=1), requires_grad=False
-            )
-            latent_samples_log.append(latent_samples.flatten())
+            order = _rank_data(ys)
+            latent_samples = sorted_exp_sample_torch(rates, order, n_samples=1).requires_grad_(False)
+            latent_samples_logger.log(latent_samples.cpu())
             theta = theta.requires_grad_(True)
             for _ in range(n_langevin_steps):
-                # Choose a batch of xs:
-                ixs = np.random.choice(
-                    len(ys), size=min(batch_size, len(ys)), replace=False
-                )
-
                 def energy_func(theta):
-                    log_rho_xt = log_rho(xs[ixs].requires_grad_(False), theta)
+                    log_rho_xt = log_rho(xs.requires_grad_(False), theta)
                     return (
-                        torch.exp(log_rho_xt) * latent_samples[:, ixs] - log_rho_xt
+                        torch.exp(log_rho_xt) * latent_samples - log_rho_xt
                     ).sum()
 
                 theta, grad = langevin_step(
@@ -98,16 +93,17 @@ def optimize_function_langevin(
                     weight_decay=weight_decay,
                     temperature=param_temperature,
                 )
-                theta_grads.append(grad)
-            rates = torch.exp(log_rho(xs, theta)).detach().numpy()
+                theta_grad_logger.log(grad.cpu())
+            rates = torch.exp(log_rho(xs, theta)).detach().flatten()
         # Sample from the distribution:
         # Seed x from the lowest temperature% of y values:
         n_ys = max(int(len(ys) * temperature), 1)
-        best_ys = np.argsort(ys.flatten())[:n_ys]
+        best_ys = torch.argsort(ys.flatten())[:n_ys]
         # Infer sampling rates for those ys:
-        rates = log_rho(xs[best_ys], theta).detach().numpy()
+        rates = log_rho(xs[best_ys], theta).detach().flatten()
         # Sample according to the likelihood that we're near a good point:
-        ix = np.argmax(rates + np.random.gumbel(size=len(rates)))
+        gumbels = -torch.log(-torch.log(1-torch.rand(len(rates)).to(rates)))
+        ix = torch.argmax(rates + gumbels)
         x = xs[ix].detach().view([1, -1]).clone()
         x = x.requires_grad_(True)
 
@@ -122,26 +118,32 @@ def optimize_function_langevin(
                 temperature=sample_temperature,
                 weight_decay=0,
             )
-            x_grads.append(grad)
-        y = function(x.detach().numpy())
+            x_grad_logger.log(grad.cpu())
+        y = function(x.detach())
         xs = torch.concatenate([xs, x.detach().flatten()[None, :]], dim=0)
-        ys = np.concatenate([ys, [y.flatten()]], axis=0)
-        rates = torch.exp(log_rho(xs, theta)).detach().numpy()
+        ys = torch.concatenate([ys, y.reshape(1)], dim=0)
+        rates = torch.exp(log_rho(xs, theta)).detach().flatten()
     # Plot some diagnostics:
+    _plot_diagnostics(latent_samples_logger, theta_grad_logger, x_grad_logger)
+    return theta, xs, ys
+
+
+def _plot_diagnostics(latent_samples_logger, theta_grad_logger, x_grad_logger):
+    """Plot some helpful diagnostics."""
     fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-    axs[0].plot(theta_grads, label="theta grads")
+    theta_grads = theta_grad_logger.get()
+    axs[0].plot(theta_grads[:, 0], theta_grads[:, 1], label="theta grads")
     axs[0].set_title("theta grads")
-    axs[1].plot(x_grads, label="x grads")
+    x_grads = x_grad_logger.get()
+    axs[1].plot(x_grads[:, 0], x_grads[:, 1], label="x grads")
     axs[1].set_title("x grads")
     # Plot a scatterplot of latent samples:
-    sample_index = torch.concatenate(
-        [
-            torch.ones_like(latent_samples_log[i]) * i
-            for i in range(len(latent_samples_log))
-        ],
-        dim=0,
-    )
-    latent_samples_log = torch.concatenate(latent_samples_log, dim=0)
-    axs[2].scatter(sample_index, torch.log(latent_samples_log), alpha=0.1)
+    latent_samples = latent_samples_logger.get()
+    pure_samples = latent_samples[:, 1:]
+    sample_index = np.broadcast_to(latent_samples[:, :1], pure_samples.shape)
+    axs[2].scatter(sample_index.flatten(), np.log(pure_samples).flatten(), alpha=0.1)
+    axs[2].set_title("latent samples")
+    axs[0].set_xlabel("step")
+    axs[1].set_xlabel("step")
+    axs[2].set_xlabel("step")
     fig.show()
-    return theta, xs, ys
