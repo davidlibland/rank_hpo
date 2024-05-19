@@ -1,6 +1,6 @@
 """Main module."""
 
-from typing import List, Callable, Tuple
+from typing import List, Callable, Tuple, Dict
 
 import numpy as np
 import torch
@@ -70,7 +70,7 @@ def optimize_function_langevin(
     n_log_samples=100,
     bounds=Tuple[torch.Tensor, torch.Tensor],
     batch_size=100,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, np.ndarray]]:
     """
     Optimize a function using gumbel-rank thompson sampling.
 
@@ -98,7 +98,8 @@ def optimize_function_langevin(
 
     Returns:
         The updated parameters, the points evaluated, the values evaluated,
-        and the latent samples.
+        and the latent samples, along with a dict containing the theta values
+        evolving over time.
     """
     x0s = [x0.clone().requires_grad_(False) for x0 in x0s]
     xs = torch.stack(x0s, dim=0)
@@ -107,6 +108,7 @@ def optimize_function_langevin(
     theta_grad_logger = TimeSeriesLogger(n_log_samples)
     x_grad_logger = TimeSeriesLogger(n_log_samples)
     latent_samples_logger = TimeSeriesLogger(n_log_samples, dim=n_log_samples // 10)
+    theta_logger = TimeSeriesLogger(n_log_samples, dim=theta.flatten().shape[0])
     for i in tqdm(range(n_evals)):
         temperature = (n_evals - i) / n_evals
         param_temperature = (
@@ -168,7 +170,7 @@ def optimize_function_langevin(
                 )
                 theta_grad_logger.log(grad.cpu())
             rates = torch.exp(log_rho(xs, theta)).detach().flatten()
-
+        theta_logger.log(theta.flatten().detach().cpu().numpy())
         # Sample from the distribution.
         # First we choose a new seed point, based on the learnt likelihood:
         random_xs = torch.rand(300, xs.shape[1], device=xs.device, dtype=xs.dtype)
@@ -210,7 +212,12 @@ def optimize_function_langevin(
     _plot_diagnostics(
         latent_samples_logger, theta_grad_logger, x_grad_logger, ys_to_latents.detach().cpu().numpy()
     )
-    return theta, xs, ys, latent_samples
+    thetas = theta_logger.get()
+    theta_movie = {
+        "step": thetas[:, 0],
+        "theta": thetas[:, 1:].reshape(len(thetas), *theta.shape),
+    }
+    return theta, xs, ys, latent_samples, theta_movie
 
 
 ####################
