@@ -48,17 +48,17 @@ def n_layer_mlp(visible_dim, reg=1e-4, n_layers=2):
         """
         This is a simple 2-layer mlp units and gelu activation
         x must be of shape [n_samples, visible_dim]
-        theta must be of shape [2 * (visible_dim + 1) + (n_layers-1) * (hidden_dim + 1), hidden_dim]
+        theta must be of shape [2 * (visible_dim + 1) + (n_layers-2) * (hidden_dim + 1), hidden_dim]
         """
         assert (
             x.ndim == 2
         ), f"x should be a 2d tensor, or shape (n_samples, d), got shape {x.shape}"
-        assert theta.shape[0] == 2 * (visible_dim + 1) + (n_layers - 1) * (
+        assert theta.shape[0] == 2 * (visible_dim + 1) + (n_layers - 2) * (
             theta.shape[1] + 1
         ), (
             f"theta should have the right number of elements, "
             f"got {theta.shape[0]} instead of "
-            f"{2 * (visible_dim + 1) + (n_layers - 1) * (theta.shape[1] + 1)}"
+            f"{2 * (visible_dim + 1) + (n_layers - 2) * (theta.shape[1] + 1)}"
         )
         # Peel the weights and biases from theta
         layer_1_weights = theta[:visible_dim]

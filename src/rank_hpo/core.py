@@ -208,7 +208,7 @@ def optimize_function_langevin(
     ).requires_grad_(False)
     ys_to_latents = torch.stack([ys.flatten(), latent_samples.flatten()], dim=1)
     _plot_diagnostics(
-        latent_samples_logger, theta_grad_logger, x_grad_logger, ys_to_latents
+        latent_samples_logger, theta_grad_logger, x_grad_logger, ys_to_latents.detach().cpu().numpy()
     )
     return theta, xs, ys, latent_samples
 
