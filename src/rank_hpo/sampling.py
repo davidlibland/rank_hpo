@@ -1,13 +1,15 @@
 """Some sampling functions for the rank HPO project."""
 
 import math
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 import torch
 
 
-def sorted_exp_sample(rates: List[float], order: List[float], n_samples=1):
+def sorted_exp_sample(
+    rates: List[float], order: List[float], n_samples=1
+) -> np.ndarray:
     """
     Sample from a set of exponential distributions with different rates,
     given that they appear in a certain order.
@@ -31,7 +33,9 @@ def sorted_exp_sample(rates: List[float], order: List[float], n_samples=1):
     return samples[:, order]
 
 
-def sorted_exp_sample_torch(rates: torch.Tensor, order: torch.Tensor, n_samples=1):
+def sorted_exp_sample_torch(
+    rates: torch.Tensor, order: torch.Tensor, n_samples=1
+) -> torch.Tensor:
     """
     Sample from a set of exponential distributions with different rates,
     given that they appear in a certain order.
@@ -59,9 +63,10 @@ def sorted_exp_sample_torch(rates: torch.Tensor, order: torch.Tensor, n_samples=
 
 def langevin_step(
     theta: torch.Tensor, energy_func, step_size=1e-3, weight_decay=1e-4, temperature=1
-):
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Perform a Langevin step on a parameter theta, given an energy function.
+    Note that the values of the parameter are updated in-place.
 
     Args:
         theta: The parameter to update.
@@ -72,7 +77,7 @@ def langevin_step(
             A temperature of 1 corresponds to approximate sampling from the distribution.
 
     Returns:
-        The updated parameter.
+        The updated parameter, and the norm of the gradient.
     """
     theta = theta.requires_grad_(True)
     if theta.grad is not None:

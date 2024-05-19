@@ -32,17 +32,41 @@ def gaussian(std: Union[float, LEARN] = 1):
 
 
 def n_layer_mlp(visible_dim, reg=1e-4, n_layers=2):
+    """
+    Builds a simple n-layer mlp with gelu activations and layer normalization.
+
+    Args:
+        visible_dim: The dimension of the input
+        reg: The regularization strength
+        n_layers: The number of layers in the mlp
+
+    Returns:
+        A function that computes the log density of the distribution
+    """
+
     def log_rho(x, theta):
-        """This is a simple 2-layer mlp units and gelu activation"""
+        """
+        This is a simple 2-layer mlp units and gelu activation
+        x must be of shape [n_samples, visible_dim]
+        theta must be of shape [2 * (visible_dim + 1) + (n_layers-1) * (hidden_dim + 1), hidden_dim]
+        """
         assert (
             x.ndim == 2
         ), f"x should be a 2d tensor, or shape (n_samples, d), got shape {x.shape}"
+        assert theta.shape[0] == 2 * (visible_dim + 1) + (n_layers - 1) * (
+            theta.shape[1] + 1
+        ), (
+            f"theta should have the right number of elements, "
+            f"got {theta.shape[0]} instead of "
+            f"{2 * (visible_dim + 1) + (n_layers - 1) * (theta.shape[1] + 1)}"
+        )
+        # Peel the weights and biases from theta
         layer_1_weights = theta[:visible_dim]
         mean = theta[visible_dim : 2 * visible_dim][:, 0].reshape(1, -1)
         layer_1_bias = theta[2 * visible_dim : 2 * visible_dim + 1]
         final_weights = theta[2 * visible_dim + 1 : 2 * visible_dim + 2]
 
-        # layer_1 = torch.nn.functional.gelu(x@layer_1_weights+layer_1_bias)
+        # Apply the first layer, this embeds the input in a hidden_dim-dimensional space
         y = x @ layer_1_weights + layer_1_bias
         y = torch.nn.functional.layer_norm(
             y, normalized_shape=layer_1_weights.shape[1:]
@@ -50,26 +74,19 @@ def n_layer_mlp(visible_dim, reg=1e-4, n_layers=2):
         y = torch.nn.functional.gelu(y)
         dim = theta.shape[1]
         for i in range(0, n_layers - 2):
-            weights = theta[
-                2 * (visible_dim + 1)
-                + i * (dim + 1) : 2 * (visible_dim + 1)
-                + i * (dim + 1)
-                + dim
-            ]
-            bias = theta[
-                2 * (visible_dim + 1)
-                + i * (dim + 1)
-                + dim : 2 * (visible_dim + 1)
-                + i * (dim + 1)
-                + dim
-                + 1
-            ]
+            # Iteratively peel off the weights and biases
+            start = 2 * (visible_dim + 1) + i * (dim + 1)
+            weights = theta[start : start + dim]
+            bias = theta[start + dim : start + dim + 1]
+            # Apply the layer
             y_ = y @ weights + bias
             y_ = torch.nn.functional.layer_norm(y_, normalized_shape=y.shape[1:])
             y_ = torch.nn.functional.gelu(y_)
             y = y_ + y
+        # Apply the final layer, projecting to 1-dimension
         out = y @ final_weights.T
-        return out - (reg * (x - mean) ** 2).sum(dim=1, keepdim=True)
+        prior = (reg * (x - mean) ** 2).sum(dim=1, keepdim=True)
+        return out - prior
 
     return log_rho
 
@@ -81,6 +98,7 @@ def gaussian_mixture(grid: np.ndarray, std=1):
 
     Args:
         grid: The grid of points to center the gaussians at, of shape (n, d)
+        std: The standard deviation of each component.
     """
 
     def log_rho(x, theta):

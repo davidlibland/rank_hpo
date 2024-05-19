@@ -13,6 +13,21 @@ from rank_hpo.sampling import sorted_exp_sample, langevin_step, sorted_exp_sampl
 
 
 def infer_rates(samples: List[np.ndarray], n_iter=1000):
+    """
+    Infer the rates of a set of samples. Given a set of samples,
+    this learns rates of exponential distributions which match the
+    order of the samples. Here `samples` is assumed to be a list of
+    numpy arrays, where each array contains samples corresponding to
+    a different distribution. One rate is learnt for each distribution.
+
+    Args:
+        samples: A list of numpy arrays, where each array contains samples
+            corresponding to a different distribution.
+        n_iter: The number of iterations to perform.
+
+    Returns:
+        The inferred rates. A numpy array of the same length as `samples`.
+    """
     all_rates = []
     rates = np.ones(len(samples))
     flat_samples = np.concatenate(samples)
@@ -39,12 +54,6 @@ def infer_rates(samples: List[np.ndarray], n_iter=1000):
     return rate / rate.max()
 
 
-def _rank_data(data: torch.Tensor) -> torch.Tensor:
-    """Returns the (zero-based) rank of elements in the data."""
-    temp = torch.argsort(data.flatten())
-    return torch.argsort(temp).reshape(data.shape)
-
-
 def optimize_function_langevin(
     function: Callable[[torch.Tensor], torch.Tensor],
     x0s: List[torch.Tensor],
@@ -61,7 +70,7 @@ def optimize_function_langevin(
     n_log_samples=100,
     bounds=Tuple[torch.Tensor, torch.Tensor],
     batch_size=100,
-):
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Optimize a function using gumbel-rank thompson sampling.
 
@@ -86,6 +95,10 @@ def optimize_function_langevin(
         n_log_samples: The number of samples to log.
         bounds: The bounds of the input space.
         batch_size: The batch size for the langevin dynamics.
+
+    Returns:
+        The updated parameters, the points evaluated, the values evaluated,
+        and the latent samples.
     """
     x0s = [x0.clone().requires_grad_(False) for x0 in x0s]
     xs = torch.stack(x0s, dim=0)
@@ -198,6 +211,17 @@ def optimize_function_langevin(
         latent_samples_logger, theta_grad_logger, x_grad_logger, ys_to_latents
     )
     return theta, xs, ys, latent_samples
+
+
+####################
+# Helper functions #
+####################
+
+
+def _rank_data(data: torch.Tensor) -> torch.Tensor:
+    """Returns the (zero-based) rank of elements in the data."""
+    temp = torch.argsort(data.flatten())
+    return torch.argsort(temp).reshape(data.shape)
 
 
 def _plot_diagnostics(
