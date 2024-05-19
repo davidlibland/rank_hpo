@@ -47,9 +47,11 @@ def sorted_exp_sample_torch(rates: torch.Tensor, order: torch.Tensor, n_samples=
     order_inv = torch.argsort(order)
     rates_sorted = rates[order_inv]
     rates_summed = torch.cumsum(rates_sorted.flip(0), dim=0).flip(0)
-    sample_shifts = torch.distributions.exponential.Exponential(rates_summed).sample(
-        (n_samples,)
-    ).to(rates)
+    sample_shifts = (
+        torch.distributions.exponential.Exponential(rates_summed)
+        .sample((n_samples,))
+        .to(rates)
+    )
     samples = torch.cumsum(sample_shifts, dim=1)
     assert samples.shape == (n_samples, len(rates))
     return samples[:, order]

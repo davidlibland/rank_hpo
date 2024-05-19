@@ -50,8 +50,8 @@ def optimize_function_langevin(
     x0s: List[torch.Tensor],
     log_rho,
     theta: torch.Tensor,
-    n_evals=1000,
-    n_iter=1000,
+    n_evals=100,
+    n_iter=100,
     weight_decay=1e-4,
     param_step_size=1e-3,
     sample_step_size=1e-3,
@@ -60,15 +60,40 @@ def optimize_function_langevin(
     sample_temperature_range=(1, 0.1),
     n_log_samples=100,
     bounds=Tuple[torch.Tensor, torch.Tensor],
-    batch_size=100
+    batch_size=100,
 ):
+    """
+    Optimize a function using gumbel-rank thompson sampling.
+
+    Args:
+        function: The function to optimize.
+        x0s: The initial points to start from.
+        log_rho: The log likelihood function of the optimal point;
+            This must be of the form log_rho(x, theta),
+            where x is the input, and theta is the parameters.
+            theta will be updated during training to maximize the likelihood.
+        theta: The parameters of the log likelihood function.
+            These will be updated during training.
+        n_evals: The number of evaluations of the functions to perform.
+        n_iter: The number of iterations of mcmc sampling to perform.
+        weight_decay: The weight decay for the parameters.
+        param_step_size: The step size for the parameter updates.s
+        sample_step_size: The step size for the sample updates.
+        n_langevin_steps: The number of langevin steps to perform
+            for each update of the latent samples.
+        param_temperature_range: The range of temperatures for the parameter updates.
+        sample_temperature_range: The range of temperatures for the sample updates.
+        n_log_samples: The number of samples to log.
+        bounds: The bounds of the input space.
+        batch_size: The batch size for the langevin dynamics.
+    """
     x0s = [x0.clone().requires_grad_(False) for x0 in x0s]
     xs = torch.stack(x0s, dim=0)
     ys = torch.concat([function(x.detach()).flatten() for x in x0s])
     rates = torch.ones(len(xs), device=theta.device)
     theta_grad_logger = TimeSeriesLogger(n_log_samples)
     x_grad_logger = TimeSeriesLogger(n_log_samples)
-    latent_samples_logger = TimeSeriesLogger(n_log_samples, dim=n_log_samples//10)
+    latent_samples_logger = TimeSeriesLogger(n_log_samples, dim=n_log_samples // 10)
     for i in tqdm(range(n_evals)):
         temperature = (n_evals - i) / n_evals
         param_temperature = (
@@ -79,25 +104,44 @@ def optimize_function_langevin(
         ) * temperature + sample_temperature_range[1]
         for _ in range(n_iter):
             order = _rank_data(ys)
-            latent_samples = sorted_exp_sample_torch(rates+1e-6, order, n_samples=1).requires_grad_(False)
+            latent_samples = sorted_exp_sample_torch(
+                rates + 1e-6, order, n_samples=1
+            ).requires_grad_(False)
             latent_samples_logger.log(latent_samples.cpu())
+
+            # Normalize the samples to [0,1] at the start of training, and gradually cool down to
+            # the true latent samples.
+            log_latent_samples = torch.log(latent_samples.flatten())
+            log_latent_sample_scale = (
+                log_latent_samples.max() - log_latent_samples.min()
+            )
+            # The rescaling value is a linear combination of 1 (no rescaling) and 0 (full rescaling)
+            # full rescaling is achieved at the start of training, when temperature=1, and no rescaling
+            # is achieved at the end of training, when temperature=0.
+            log_latent_sample_scale = temperature * log_latent_sample_scale + (
+                1 - temperature
+            )
+            log_latent_samples = (
+                log_latent_samples - log_latent_samples.min()
+            ) / log_latent_sample_scale
+
+            # Now update theta using Langevin dynamics:
             theta = theta.requires_grad_(True)
             for _ in range(n_langevin_steps):
-                # Subsample the data:
+                # Subsample the data if necessary, to keep the batch sizes reasonable.
                 if len(xs) > batch_size:
-                    ixs = torch.multinomial(torch.ones(len(xs)), batch_size, replacement=False)
+                    ixs = torch.multinomial(
+                        torch.ones(len(xs)), batch_size, replacement=False
+                    )
                 else:
                     ixs = torch.arange(len(xs))
 
-                log_latent_samples = torch.log(latent_samples.flatten())
-                log_latent_sample_scale = log_latent_samples.max()-log_latent_samples.min()
-                log_latent_sample_scale = temperature* log_latent_sample_scale + (1-temperature)
-                log_latent_samples = (log_latent_samples-log_latent_samples.min())/log_latent_sample_scale
                 def energy_func(theta):
                     log_rho_xt = log_rho(xs[ixs].requires_grad_(False), theta).flatten()
 
                     return (
-                        torch.exp(log_rho_xt+log_latent_samples.flatten()[ixs]) - 2*log_rho_xt
+                        torch.exp(log_rho_xt + log_latent_samples.flatten()[ixs])
+                        - 2 * log_rho_xt
                         # The factor of 2 here comes from the change of variables
                         # from rho to log_rho.
                     ).sum()
@@ -111,18 +155,21 @@ def optimize_function_langevin(
                 )
                 theta_grad_logger.log(grad.cpu())
             rates = torch.exp(log_rho(xs, theta)).detach().flatten()
-        # Sample from the distribution:
+
+        # Sample from the distribution.
+        # First we choose a new seed point, based on the learnt likelihood:
         random_xs = torch.rand(300, xs.shape[1], device=xs.device, dtype=xs.dtype)
         random_xs = bounds[0] + random_xs * (bounds[1] - bounds[0])
         xs_options = torch.cat([xs, random_xs], dim=0)
-        # Infer sampling rates for those ys:
+        # Evaluate the likelihood at these points:
         log_rates = log_rho(xs_options, theta).detach().flatten()
         # Sample according to the likelihood that we're near a good point:
-        gumbels = -torch.log(-torch.log(1-torch.rand(len(log_rates)).to(log_rates)))
-        ix = torch.argmax(log_rates + sample_temperature*gumbels)
+        gumbels = -torch.log(-torch.log(1 - torch.rand(len(log_rates)).to(log_rates)))
+        ix = torch.argmax(log_rates + sample_temperature * gumbels)
         x = xs_options[ix].detach().view([1, -1]).clone()
         x = x.requires_grad_(True)
 
+        # Now run Langevin sampling to update this point:
         def energy_function(x):
             return -log_rho(x, theta.requires_grad_(False))
 
@@ -135,18 +182,27 @@ def optimize_function_langevin(
                 weight_decay=0,
             )
             x_grad_logger.log(grad.cpu())
+
+        # Evaluate the function at the chosen point and update the data:
         y = function(x.detach())
         xs = torch.concatenate([xs, x.detach().flatten()[None, :]], dim=0)
         ys = torch.concatenate([ys, y.reshape(1)], dim=0)
         rates = torch.exp(log_rho(xs, theta)).detach().flatten()
-    # Plot some diagnostics:
-    latent_samples = sorted_exp_sample_torch(rates+1e-6, _rank_data(ys), n_samples=1).requires_grad_(False)
+
+    # Finally, plot some diagnostics:
+    latent_samples = sorted_exp_sample_torch(
+        rates + 1e-6, _rank_data(ys), n_samples=1
+    ).requires_grad_(False)
     ys_to_latents = torch.stack([ys.flatten(), latent_samples.flatten()], dim=1)
-    _plot_diagnostics(latent_samples_logger, theta_grad_logger, x_grad_logger, ys_to_latents)
+    _plot_diagnostics(
+        latent_samples_logger, theta_grad_logger, x_grad_logger, ys_to_latents
+    )
     return theta, xs, ys, latent_samples
 
 
-def _plot_diagnostics(latent_samples_logger, theta_grad_logger, x_grad_logger, ys_to_latents):
+def _plot_diagnostics(
+    latent_samples_logger, theta_grad_logger, x_grad_logger, ys_to_latents
+):
     """Plot some helpful diagnostics."""
     fig, axs = plt.subplots(2, 2, figsize=(10, 10))
     theta_grads = theta_grad_logger.get()
