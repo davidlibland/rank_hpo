@@ -31,19 +31,29 @@ def gaussian(std: Union[float, LEARN] = 1):
         return log_rho_fixed_std
 
 
-def two_layer_mlp(visible_dim):
+def n_layer_mlp(visible_dim, reg=1e-4, n_layers=2):
     def log_rho(x, theta):
         """This is a simple 2-layer mlp units and gelu activation"""
+        assert x.ndim == 2, f"x should be a 2d tensor, or shape (n_samples, d), got shape {x.shape}"
         layer_1_weights = theta[:visible_dim]
-        layer_1_bias = theta[visible_dim:visible_dim+1]
-        layer_2_weights = theta[visible_dim+1:visible_dim+2]
+        mean = theta[visible_dim:2*visible_dim][:, 0].reshape(1, -1)
+        layer_1_bias = theta[2*visible_dim:2*visible_dim+1]
+        final_weights = theta[2*visible_dim+1:2*visible_dim+2]
 
         # layer_1 = torch.nn.functional.gelu(x@layer_1_weights+layer_1_bias)
-        linear_1 = x @ layer_1_weights + layer_1_bias
-        linear_1 = torch.nn.functional.layer_norm(linear_1, normalized_shape=layer_1_weights.shape[1:])
-        layer_1 = torch.nn.functional.gelu(linear_1)
-        layer_2 = layer_1 @ layer_2_weights.T
-        return layer_2 - (1e-4 * x ** 2).sum(dim=1, keepdim=True)
+        y = x @ layer_1_weights + layer_1_bias
+        y = torch.nn.functional.layer_norm(y, normalized_shape=layer_1_weights.shape[1:])
+        y = torch.nn.functional.gelu(y)
+        dim = theta.shape[1]
+        for i in range(0, n_layers-2):
+            weights = theta[2*(visible_dim+1)+i*(dim+1):2*(visible_dim+1)+i*(dim+1)+dim]
+            bias = theta[2*(visible_dim+1)+i*(dim+1)+dim:2*(visible_dim+1)+i*(dim+1)+dim+1]
+            y_ = y @ weights + bias
+            y_ = torch.nn.functional.layer_norm(y_, normalized_shape=y.shape[1:])
+            y_ = torch.nn.functional.gelu(y_)
+            y = y_+y
+        out = y @ final_weights.T
+        return out - (reg * (x-mean) ** 2).sum(dim=1, keepdim=True)
 
     return log_rho
 
@@ -58,6 +68,10 @@ def gaussian_mixture(grid: np.ndarray, std=1):
     """
     def log_rho(x, theta):
         """Theta is of shape (n, d), and represents the weight of each gaussian"""
+        assert x.ndim == 2, f"x should be a 2d tensor, or shape (n_samples, d), got shape {x.shape}"
+        assert theta.ndim == 1, f"theta should be a 1d tensor, or shape (n_gaussians), got shape {theta.shape}"
+        assert grid.shape[1] == x.shape[1], f"grid should have the same number of columns as x, got {grid.shape[1]} and {x.shape[1]}"
+        assert theta.shape[0] == grid.shape[0], f"theta should have the same number of elements as the number of gaussians, got {theta.shape[0]} and {grid.shape[0]}"
         gaussians = (
             -0.5 * ((x[:, None, :] - grid[None, :, :]) ** 2).sum(dim=2) / (std**2)
             + theta[None, :]

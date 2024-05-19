@@ -18,7 +18,7 @@ classifiers = [
 ]
 license = {text = "MIT license"}
 dependencies = [
-  
+
     "numpy",
     "pandas",
     "jupyter",
@@ -27,7 +27,9 @@ dependencies = [
     "torch",
     "lightning",
     "tensorboard",
-    "einops"
+    "einops",
+    "scikit-optimize",
+    "tqdm"
 ]
 
 [project.optional-dependencies]
